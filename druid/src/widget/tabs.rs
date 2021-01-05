@@ -423,6 +423,12 @@ impl<TP: TabsPolicy> Widget<TabsState<TP>> for TabBar<TP> {
             }
         }
     }
+
+    fn post_render(&mut self) {
+        for (_, tab) in self.tabs.iter_mut() {
+            tab.post_render();
+        }
+    }
 }
 
 struct TabsTransitionState {
@@ -662,6 +668,8 @@ impl<TP: TabsPolicy> Widget<TabsState<TP>> for TabsBody<TP> {
             child.paint_raw(ctx, &data.inner, env);
         }
     }
+
+    fn post_render(&mut self) {}
 }
 
 // This only needs to exist to be able to give a reasonable type to the TabScope
@@ -969,6 +977,12 @@ impl<TP: TabsPolicy> Widget<TP::Input> for Tabs<TP> {
     fn paint(&mut self, ctx: &mut PaintCtx, data: &TP::Input, env: &Env) {
         if let TabsContent::Running { scope } = &mut self.content {
             scope.paint(ctx, data, env)
+        }
+    }
+
+    fn post_render(&mut self) {
+        if let TabsContent::Running { scope } = &mut self.content {
+            scope.post_render();
         }
     }
 }

@@ -93,4 +93,8 @@ impl<T: Data, W: Widget<T>> Widget<T> for EnvScope<T, W> {
 
         self.child.paint(ctx, data, &new_env);
     }
+
+    fn post_render(&mut self) {
+        self.child.post_render();
+    }
 }

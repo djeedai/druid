@@ -16,15 +16,19 @@
 
 use std::collections::{HashMap, VecDeque};
 
+use crate::app::NativeWindowLayoutDesc;
 use crate::bloom::Bloom;
+use crate::commands;
 use crate::contexts::ContextState;
 use crate::kurbo::{Affine, Insets, Point, Rect, Shape, Size, Vec2};
 use crate::util::ExtendDrain;
 use crate::{
     ArcStr, BoxConstraints, Color, Command, Cursor, Data, Env, Event, EventCtx, InternalEvent,
     InternalLifeCycle, LayoutCtx, LifeCycle, LifeCycleCtx, Notification, PaintCtx, Region,
-    RenderContext, Target, TextLayout, TimerToken, UpdateCtx, Widget, WidgetId,
+    RenderContext, SingleUse, Target, TextLayout, TimerToken, UpdateCtx, Widget, WidgetId,
+    WindowId,
 };
+use log::debug;
 
 /// Our queue type
 pub(crate) type CommandQueue = VecDeque<Command>;
@@ -53,6 +57,22 @@ pub struct WidgetPod<T, W> {
     debug_widget_text: TextLayout<ArcStr>,
 }
 
+/// Generic state for widgets which have a native OS window associated with them.
+/// The widget manages the position and size of that native window automatically
+/// to match the layout of the widget itself.
+#[derive(Clone)]
+pub(crate) struct NativeWidgetState {
+    /// Window id of the native child window this widget owns.
+    pub(crate) window_id: WindowId,
+    /// Window id of the native parent window.
+    pub(crate) parent_window_id: WindowId,
+    /// Position of the native window relative to its native parent window. This
+    /// is usually different from the widget origin, which relates to the parent
+    /// widget which may not have a native window.
+    /// The size of the native window is the same as the size of the widget.
+    pub(crate) native_position: Point,
+}
+
 /// Generic state for all widgets in the hierarchy.
 ///
 /// This struct contains the widget's layout rect, flags
@@ -77,6 +97,11 @@ pub(crate) struct WidgetState {
     /// The origin of the child in the parent's coordinate space; together with
     /// `size` these constitute the child's layout rect.
     origin: Point,
+    /// The origin of the child in the coordinate space of the native window that
+    /// contains it, which is generally the top-level window. For widgets that own
+    /// a native window themselves, this is the origin relative to their parent
+    /// window, if any, or is unspecified for the root widget of a top-level window.
+    native_origin: Point,
     /// A flag used to track and debug missing calls to set_origin.
     is_expecting_set_origin_call: bool,
     /// The insets applied to the layout rect to generate the paint rect.
@@ -105,6 +130,14 @@ pub(crate) struct WidgetState {
     pub(crate) is_active: bool,
 
     pub(crate) needs_layout: bool,
+
+    /// State of the native window this widget is owning, if any. This is populated only after
+    /// a widget requested a native window via [`LifeCycleCtx::request_native_window()`]. This
+    /// is `None` if the widget does not have a native window, which is the most common case.
+    pub(crate) native_state: Option<NativeWidgetState>,
+
+    /// This widget has a child widget with a native window.
+    //pub(crate) has_native_child: bool,
 
     /// Any descendant is active.
     has_active: bool,
@@ -242,17 +275,39 @@ impl<T, W: Widget<T>> WidgetPod<T, W> {
     ///
     /// The child will receive the [`LifeCycle::Size`] event informing them of the final [`Size`].
     ///
+    /// If the child widget has a [native window](LifeCycleCtx::request_native_window), then that
+    /// window will be moved and resized to fit the position and size of the widget itself.
+    ///
     /// [`Widget::layout`]: trait.Widget.html#tymethod.layout
     /// [`Rect`]: struct.Rect.html
     /// [`Size`]: struct.Size.html
     /// [`LifeCycle::Size`]: enum.LifeCycle.html#variant.Size
     pub fn set_origin(&mut self, ctx: &mut LayoutCtx, data: &T, env: &Env, origin: Point) {
         self.state.origin = origin;
+        //self.state.native_origin = native_origin;
         self.state.is_expecting_set_origin_call = false;
-        let layout_rect = self.layout_rect();
+
+        // If widget has a native window, that window needs to move
+        if let Some(native_state) = &self.state.native_state {
+            let desc = NativeWindowLayoutDesc {
+                id: native_state.window_id,
+                origin: Some(origin),        //TODO: Some(native_origin),
+                size: Some(self.state.size), // TODO: should this really be forced here? But without it currently size is never set...
+            };
+            debug!(
+                "set_origin() => submit SET_NATIVE_WINDOW_LAYOUT(id={:?}, origin={})",
+                native_state.window_id, origin
+            );
+            ctx.submit_command(
+                commands::SET_NATIVE_WINDOW_LAYOUT
+                    .with(SingleUse::new(Box::new(desc)))
+                    .to(Target::Global),
+            );
+        }
 
         // if the widget has moved, it may have moved under the mouse, in which
         // case we need to handle that.
+        let layout_rect = self.layout_rect();
         if WidgetPod::set_hot_state(
             &mut self.inner,
             &mut self.state,
@@ -429,6 +484,11 @@ impl<T: Data, W: Widget<T>> WidgetPod<T, W> {
         }
 
         ctx.z_ops.append(&mut inner_ctx.z_ops);
+    }
+
+    /// Callback after paint finished and present was submitted.
+    pub fn post_render(&mut self) {
+        self.inner.post_render();
     }
 
     /// Paint the widget, translating it by the origin of its layout rectangle.
@@ -614,7 +674,7 @@ impl<T: Data, W: Widget<T>> WidgetPod<T, W> {
         if self.state.is_expecting_set_origin_call && !event.should_propagate_to_hidden() {
             log::warn!(
                 "{:?} received an event ({:?}) without having been laid out. \
-                This likely indicates a missed call to set_layout_rect.",
+                This likely indicates a missed call to set_origin().",
                 ctx.widget_id(),
                 event,
             );
@@ -675,6 +735,7 @@ impl<T: Data, W: Widget<T>> WidgetPod<T, W> {
                 }
             },
             Event::WindowConnected => true,
+            Event::NativeWindowConnected(_) => true,
             Event::WindowSize(_) => {
                 self.state.needs_layout = true;
                 ctx.is_root
@@ -1025,6 +1086,7 @@ impl WidgetState {
         WidgetState {
             id,
             origin: Point::ORIGIN,
+            native_origin: Point::ORIGIN,
             size: size.unwrap_or_default(),
             is_expecting_set_origin_call: true,
             paint_insets: Insets::ZERO,
@@ -1033,6 +1095,7 @@ impl WidgetState {
             baseline_offset: 0.0,
             is_hot: false,
             needs_layout: false,
+            native_state: None,
             is_active: false,
             has_active: false,
             has_focus: false,
@@ -1074,6 +1137,12 @@ impl WidgetState {
         // invisible children, and we shouldn't allow these invisible children to accumulate
         // invalid rects.
         child_state.invalid.clear();
+
+        if let Some(native_state) = &self.native_state {
+            // Parent widget with a native child window; that window is the child widget's
+            // ancestor window relative to which its native origin is.
+            child_state.native_origin = child_state.origin;
+        }
 
         self.needs_layout |= child_state.needs_layout;
         self.request_anim |= child_state.request_anim;

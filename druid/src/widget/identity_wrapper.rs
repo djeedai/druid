@@ -54,4 +54,8 @@ impl<T: Data, W: Widget<T>> Widget<T> for IdentityWrapper<W> {
     fn id(&self) -> Option<WidgetId> {
         Some(self.id)
     }
+
+    fn post_render(&mut self) {
+        self.inner.post_render();
+    }
 }

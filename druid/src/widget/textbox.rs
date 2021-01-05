@@ -519,6 +519,8 @@ impl<T: TextStorage + EditableText> Widget<T> for TextBox<T> {
         // Paint the border
         ctx.stroke(clip_rect, &border_color, border_width);
     }
+
+    fn post_render(&mut self) {}
 }
 
 impl<T> Default for TextBox<T> {

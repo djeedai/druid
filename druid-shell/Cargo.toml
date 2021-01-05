@@ -48,6 +48,8 @@ cfg-if = "0.1.10"
 instant = { version = "0.1.6", features = ["wasm-bindgen"] }
 anyhow = "1.0.32"
 keyboard-types = { version = "0.5.0", default_features = false }
+raw-window-handle = "0.3.3"
+libc = "0.2.81"
 
 # Optional dependencies
 image = { version = "0.23.12", optional = true, default_features = false }
