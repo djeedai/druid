@@ -15,7 +15,7 @@
 //! A widget that just adds padding during layout.
 
 use crate::widget::prelude::*;
-use crate::{Data, Insets, Point, WidgetPod};
+use crate::{Color, Data, Insets, Point, Rect, WidgetPod};
 
 /// A widget that just adds padding around its child.
 pub struct Padding<T> {
@@ -100,6 +100,19 @@ impl<T: Data> Widget<T> for Padding<T> {
     }
 
     fn paint(&mut self, ctx: &mut PaintCtx, data: &T, env: &Env) {
+        let rect = Rect::from_origin_size(Point::ORIGIN, ctx.widget_state.size());
+        let color = Color::rgb(
+            1.0 / (1.0 + (ctx.widget_state.id.to_raw() as f32 - 14.0) / 3.0),
+            0.5,
+            0.5,
+        );
+        ctx.fill(rect, &color);
+        let size = ctx.widget_state.size();
+        let hpad = self.left + self.right;
+        let vpad = self.top + self.bottom;
+        let my_size = Size::new(size.width - hpad, size.height - vpad);
+        let rect = Rect::from_origin_size(Point::new(self.left, self.top), my_size);
+        ctx.fill(rect, &Color::BLACK);
         self.child.paint(ctx, data, env);
     }
 

@@ -227,9 +227,20 @@ impl<T: Data> Widget<T> for WgpuView {
         }
     }
 
-    fn paint(&mut self, _ctx: &mut PaintCtx, _data: &T, _env: &Env) {
+    fn paint(&mut self, ctx: &mut PaintCtx, _data: &T, _env: &Env) {
         // This widget does paint anything with the built-in Piet-based drawing pipeline.
         // All rendering is done externally via wgpu in post_render(), after the Piet-based
         // drawing has occurred.
+        log::info!(
+            "wgpu.paint: ctx.native_origin={:?} widget.origin={:?} -> set_native_origin({:?})",
+            ctx.native_origin,
+            ctx.widget_state.origin(),
+            ctx.native_origin + ctx.widget_state.origin().to_vec2()
+        );
+        if let Some(native_window) = &self.native_window {
+            native_window
+                .0
+                .set_native_layout(Some(ctx.native_origin), None);
+        }
     }
 }

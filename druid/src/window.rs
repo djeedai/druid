@@ -411,11 +411,17 @@ impl<T: Data> Window<T> {
             widget_state: &widget_state,
             z_ops: Vec::new(),
             region: invalid.clone(),
+            native_origin: Point::ORIGIN,
             depth: 0,
         };
 
         let root = &mut self.root;
+        log::info!("------ Window.paint_impl[BEGIN PAINT]: ctx.native_origin=ORIGIN");
         ctx.with_child_ctx(invalid.clone(), |ctx| root.paint_raw(ctx, data, env));
+        log::info!(
+            "------ Window.paint_impl[END PAINT]: ctx.native_origin={:?}",
+            ctx.native_origin
+        );
         let mut z_ops = mem::take(&mut ctx.z_ops);
         z_ops.sort_by_key(|k| k.z_index);
 

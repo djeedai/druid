@@ -134,6 +134,8 @@ pub struct PaintCtx<'a, 'b, 'c> {
     pub(crate) region: Region,
     /// The approximate depth in the tree at the time of painting.
     pub(crate) depth: u32,
+    /// The origin of the widget relative to the containing native window.
+    pub(crate) native_origin: Point,
 }
 
 // methods on everyone
@@ -747,8 +749,18 @@ impl PaintCtx<'_, '_, '_> {
             z_ops: Vec::new(),
             region: region.into(),
             depth: self.depth + 1,
+            native_origin: self.native_origin, // + self.widget_state.origin().to_vec2(),
         };
+        // log::info!("PaintCtx.with_child_ctx[BEGIN]: self.native_origin={:?} self.widget.origin={:?} -> child_ctx.native_origin={:?}",
+        //     self.native_origin,
+        //     self.widget_state.origin(),
+        //     child_ctx.native_origin
+        // );
         f(&mut child_ctx);
+        // log::info!(
+        //     "PaintCtx.with_child_ctx[END]: child_ctx.native_origin={:?}",
+        //     child_ctx.native_origin
+        // );
         self.z_ops.append(&mut child_ctx.z_ops);
     }
 

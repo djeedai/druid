@@ -291,7 +291,7 @@ impl<T, W: Widget<T>> WidgetPod<T, W> {
         if let Some(native_state) = &self.state.native_state {
             let desc = NativeWindowLayoutDesc {
                 id: native_state.window_id,
-                origin: Some(origin),        //TODO: Some(native_origin),
+                origin: None, //Some(origin),        //TODO: Some(native_origin),
                 size: Some(self.state.size), // TODO: should this really be forced here? But without it currently size is never set...
             };
             debug!(
@@ -470,6 +470,7 @@ impl<T: Data, W: Widget<T>> WidgetPod<T, W> {
             region: ctx.region.clone(),
             widget_state: &self.state,
             depth: ctx.depth,
+            native_origin: ctx.native_origin,
         };
         self.inner.paint(&mut inner_ctx, data, env);
 
@@ -525,7 +526,21 @@ impl<T: Data, W: Widget<T>> WidgetPod<T, W> {
             let mut visible = ctx.region().clone();
             visible.intersect_with(self.state.paint_rect());
             visible -= layout_origin;
+            log::info!(
+                "WidgetPod.paint_impl[begin]: layout_origin={:?} ctx.native_origin={:?} -> {:?}",
+                layout_origin,
+                ctx.native_origin,
+                ctx.native_origin + layout_origin
+            );
+            ctx.native_origin += layout_origin;
             ctx.with_child_ctx(visible, |ctx| self.paint_raw(ctx, data, env));
+            ctx.native_origin -= layout_origin;
+            log::info!(
+                "WidgetPod.paint_impl[end]: layout_origin={:?} ctx.native_origin={:?} -> {:?}",
+                layout_origin,
+                ctx.native_origin + layout_origin,
+                ctx.native_origin
+            );
         });
     }
 
@@ -1179,6 +1194,11 @@ impl WidgetState {
     #[inline]
     pub(crate) fn size(&self) -> Size {
         self.size
+    }
+
+    #[inline]
+    pub(crate) fn origin(&self) -> Point {
+        self.origin
     }
 
     /// The paint region for this widget.
