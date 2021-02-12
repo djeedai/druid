@@ -60,6 +60,9 @@ use crate::scale::Scale;
 use crate::window::{FileDialogToken, IdleToken, TimerToken, WinHandler, WindowLevel, WindowState};
 use crate::Error;
 
+#[cfg(feature = "raw-win-handle")]
+use raw_window_handle::{macos::MacOSHandle, HasRawWindowHandle, RawWindowHandle};
+
 #[allow(non_upper_case_globals)]
 const NSWindowDidBecomeKeyNotification: &str = "NSWindowDidBecomeKeyNotification";
 
@@ -115,6 +118,7 @@ pub(crate) struct WindowBuilder {
     size: Size,
     min_size: Option<Size>,
     position: Option<Point>,
+    parent: Option<WindowHandle>,
     level: Option<WindowLevel>,
     window_state: Option<WindowState>,
     resizable: bool,
@@ -128,9 +132,11 @@ pub(crate) struct IdleHandle {
 }
 
 #[derive(Debug)]
+#[allow(clippy::enum_variant_names)]
 enum DeferredOp {
     SetSize(Size),
     SetPosition(Point),
+    SetNativeLayout(Option<Point>, Option<Size>),
 }
 
 /// This represents different Idle Callback Mechanism
@@ -170,6 +176,7 @@ impl WindowBuilder {
             window_state: None,
             resizable: true,
             show_titlebar: true,
+            parent: None,
         }
     }
 
@@ -199,6 +206,10 @@ impl WindowBuilder {
 
     pub fn set_position(&mut self, position: Point) {
         self.position = Some(position)
+    }
+
+    pub fn set_parent(&mut self, parent: &WindowHandle) {
+        self.parent = Some(parent.clone());
     }
 
     pub fn set_window_state(&mut self, state: WindowState) {
@@ -233,30 +244,38 @@ impl WindowBuilder {
 
             let rect = NSRect::new(origin, NSSize::new(self.size.width, self.size.height));
 
-            let window: id = msg_send![WINDOW_CLASS.0, alloc];
-            let window = window.initWithContentRect_styleMask_backing_defer_(
-                rect,
-                style_mask,
-                NSBackingStoreBuffered,
-                NO,
-            );
+            let window: id = if let Some(parent) = self.parent.as_ref() {
+                let parentView: id = *parent.nsview.load();
+                let window: id = msg_send![parentView, window];
+                window
+            } else {
+                let window: id = msg_send![WINDOW_CLASS.0, alloc];
+                let window = window.initWithContentRect_styleMask_backing_defer_(
+                    rect,
+                    style_mask,
+                    NSBackingStoreBuffered,
+                    NO,
+                );
+                window.setTitle_(make_nsstring(&self.title));
+                if let Some(min_size) = self.min_size {
+                    let size = NSSize::new(min_size.width, min_size.height);
+                    window.setContentMinSize_(size);
+                }
 
-            if let Some(min_size) = self.min_size {
-                let size = NSSize::new(min_size.width, min_size.height);
-                window.setContentMinSize_(size);
-            }
-
-            window.setTitle_(make_nsstring(&self.title));
+                if let Some(menu) = self.menu {
+                    NSApp().setMainMenu_(menu.menu);
+                }
+                window
+            };
 
             let (view, idle_queue) = make_view(self.handler.expect("view"));
             let content_view = window.contentView();
+
             let frame = NSView::frame(content_view);
             view.initWithFrame_(frame);
 
-            let () = msg_send![window, setDelegate: view];
-
-            if let Some(menu) = self.menu {
-                NSApp().setMainMenu_(menu.menu);
+            if self.parent.is_none() {
+                let () = msg_send![window, setDelegate: view];
             }
 
             content_view.addSubview_(view);
@@ -267,12 +286,14 @@ impl WindowBuilder {
                 idle_queue,
             };
 
-            if let Some(window_state) = self.window_state {
-                handle.set_window_state(window_state);
-            }
+            if self.parent.is_none() {
+                if let Some(window_state) = self.window_state {
+                    handle.set_window_state(window_state);
+                }
 
-            if let Some(level) = self.level {
-                handle.set_level(level)
+                if let Some(level) = self.level {
+                    handle.set_level(level)
+                }
             }
 
             (*view_state).handler.connect(&handle.clone().into());
@@ -759,6 +780,7 @@ extern "C" fn draw_rect(this: &mut Object, _: Sel, dirtyRect: NSRect) {
 
         let superclass = msg_send![this, superclass];
         let () = msg_send![super(this, superclass), drawRect: dirtyRect];
+        (*view_state).handler.post_render()
     }
 }
 
@@ -766,6 +788,36 @@ fn run_deferred(this: &mut Object, view_state: &mut ViewState, op: DeferredOp) {
     match op {
         DeferredOp::SetSize(size) => set_size_deferred(this, view_state, size),
         DeferredOp::SetPosition(pos) => set_position_deferred(this, view_state, pos),
+        DeferredOp::SetNativeLayout(origin, size) => set_native_layout_deferred(this, view_state,origin, size),
+    }
+}
+
+fn set_native_layout_deferred(
+    _this: &mut Object,
+    view_state: &mut ViewState,
+    position: Option<Point>,
+    size: Option<Size>,
+) {
+
+    unsafe {
+        let view = view_state.nsview.load();
+
+        let frame_height = if let Some(size) = size {
+            NSView::setFrameSize(*view, NSSize::new(size.width, size.height));
+            size.height
+        } else {
+            NSView::frame(*view).size.height
+        };
+
+        if let Some(pos) = position {
+            let parent = NSView::superview(*view); // The content view of the window
+            let current_frame: NSRect = msg_send![parent, frame];
+
+            NSView::setFrameOrigin(
+                *view,
+                NSPoint::new(pos.x, current_frame.size.height - pos.y - frame_height),
+            );
+        }
     }
 }
 
@@ -1117,6 +1169,10 @@ impl WindowHandle {
         }
     }
 
+    pub fn set_native_layout(&self, position: Option<Point>, size: Option<Size>) {
+        self.defer(DeferredOp::SetNativeLayout(position, size));
+    }
+
     pub fn get_window_state(&self) -> WindowState {
         unsafe {
             let window: id = msg_send![*self.nsview.load(), window];
@@ -1211,6 +1267,20 @@ impl WindowHandle {
     pub fn get_scale(&self) -> Result<Scale, Error> {
         // TODO: Get actual Scale
         Ok(Scale::new(1.0, 1.0))
+    }
+}
+
+#[cfg(feature = "raw-win-handle")]
+unsafe impl HasRawWindowHandle for WindowHandle {
+    fn raw_window_handle(&self) -> RawWindowHandle {
+        let nsv = self.nsview.load();
+        // let window: id = msg_send![*nsv, window];
+        let handle = MacOSHandle {
+            //ns_window: window as *mut _,
+            ns_view: *nsv as *mut _,
+            ..MacOSHandle::empty()
+        };
+        RawWindowHandle::MacOS(handle)
     }
 }
 

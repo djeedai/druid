@@ -44,6 +44,8 @@ impl WinHandler for QuitState {
         piet.stroke(Line::new((10.0, 50.0), (90.0, 90.0)), &FG_COLOR, 1.0);
     }
 
+    fn post_render(&mut self) {}
+
     fn size(&mut self, size: Size) {
         self.size = size;
     }

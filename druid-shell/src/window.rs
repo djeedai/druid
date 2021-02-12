@@ -350,19 +350,7 @@ impl WindowHandle {
 #[cfg(feature = "raw-win-handle")]
 unsafe impl HasRawWindowHandle for WindowHandle {
     fn raw_window_handle(&self) -> RawWindowHandle {
-        if let Some(hwnd) = self.0.get_hwnd() {
-            let handle = raw_window_handle::windows::WindowsHandle {
-                hwnd: hwnd as *mut libc::c_void,
-                hinstance: unsafe {
-                    winapi::um::libloaderapi::GetModuleHandleW(0 as winapi::um::winnt::LPCWSTR)
-                        as *mut libc::c_void
-                },
-                ..raw_window_handle::windows::WindowsHandle::empty()
-            };
-            RawWindowHandle::Windows(handle)
-        } else {
-            panic!("Cannot retrieved HWMD for window.");
-        }
+        self.0.raw_window_handle()
     }
 }
 

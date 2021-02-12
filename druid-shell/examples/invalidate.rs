@@ -77,6 +77,8 @@ impl WinHandler for InvalidateTest {
         self.handle.request_anim_frame();
     }
 
+    fn post_render(&mut self) {}
+
     fn size(&mut self, size: Size) {
         self.size = size;
     }

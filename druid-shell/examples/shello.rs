@@ -44,6 +44,8 @@ impl WinHandler for HelloState {
         piet.stroke(Line::new((10.0, 50.0), (90.0, 90.0)), &FG_COLOR, 1.0);
     }
 
+    fn post_render(&mut self) {}
+
     fn command(&mut self, id: u32) {
         match id {
             0x100 => {

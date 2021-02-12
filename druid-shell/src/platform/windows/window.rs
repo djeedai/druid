@@ -159,6 +159,24 @@ pub struct WindowHandle {
     state: Weak<WindowState>,
 }
 
+#[cfg(feature = "raw-win-handle")]
+unsafe impl HasRawWindowHandle for WindowHandle {
+    fn raw_window_handle(&self) -> RawWindowHandle {
+        if let Some(hwnd) = self.0.get_hwnd() {
+            let handle = raw_window_handle::windows::WindowsHandle {
+                hwnd: hwnd as *mut libc::c_void,
+                hinstance: unsafe {
+                    winapi::um::libloaderapi::GetModuleHandleW(0 as winapi::um::winnt::LPCWSTR)
+                        as *mut libc::c_void
+                },
+                ..raw_window_handle::windows::WindowsHandle::empty()
+            };
+            RawWindowHandle::Windows(handle)
+        } else {
+            panic!("Cannot retrieved HWMD for window.");
+        }
+    }
+}
 /// A handle that can get used to schedule an idle handler. Note that
 /// this handle is thread safe. If the handle is used after the hwnd
 /// has been destroyed, probably not much will go wrong (the DS_RUN_IDLE

@@ -97,18 +97,18 @@ impl WgpuView {
     }
 
     #[allow(unsafe_code)]
-    fn create_render_data(&mut self) {
-        let backend = wgpu::BackendBit::DX11;
+    fn create_render_data(&mut self) -> Option<RenderData> {
+        let native_window = self.native_window.as_ref()?;
+        let backend = wgpu::BackendBit::DX11 | wgpu::BackendBit::METAL;
         let instance = wgpu::Instance::new(backend);
-        let surface = unsafe { instance.create_surface(&self.native_window.as_ref().unwrap().0) };
+        let surface = unsafe { instance.create_surface(&native_window.0) };
         debug!("Created WGPU surface with {:?} backend", backend);
         let power_preference = wgpu::PowerPreference::HighPerformance;
         let adapter =
             futures::executor::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference,
                 compatible_surface: Some(&surface),
-            }))
-            .unwrap();
+            }))?;
         debug!("Created WGPU adapter {:?}", adapter);
         let adapter_info = adapter.get_info();
         info!("Using {} ({:?})", adapter_info.name, adapter_info.backend);
@@ -122,8 +122,7 @@ impl WgpuView {
                 shader_validation: true,
             },
             None,
-        ))
-        .unwrap();
+        )).ok()?;
         debug!("Created WGPU device {:?} and queue {:?}", device, queue);
 
         let (pool, spawner) = {
@@ -143,7 +142,7 @@ impl WgpuView {
 
         self.renderer.init(&sc_desc, &device, &queue);
 
-        self.render_data = Some(RenderData {
+        Some(RenderData {
             instance,
             surface,
             adapter,
@@ -153,7 +152,7 @@ impl WgpuView {
             spawner,
             sc_desc,
             swap_chain,
-        });
+        })
     }
 }
 
@@ -171,8 +170,9 @@ impl<T: Data> Widget<T> for WgpuView {
                 }
             }
             Event::NativeWindowConnected(native_window) => {
+                info!("native window connected");
                 self.native_window = Some(native_window.clone());
-                self.create_render_data();
+                self.render_data = self.create_render_data();
             }
             _ => (),
         }

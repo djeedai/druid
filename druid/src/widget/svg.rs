@@ -83,6 +83,8 @@ impl<T: Data> Widget<T> for Svg {
         ctx.clip(clip_rect);
         self.svg_data.to_piet(offset_matrix, ctx);
     }
+
+    fn post_render(&mut self) {}
 }
 
 /// Stored SVG data.

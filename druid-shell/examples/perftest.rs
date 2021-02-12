@@ -106,6 +106,8 @@ impl WinHandler for PerfTest {
         self.handle.request_anim_frame();
     }
 
+    fn post_render(&mut self) {}
+
     fn command(&mut self, id: u32) {
         match id {
             0x100 => self.handle.close(),
