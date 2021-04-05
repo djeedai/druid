@@ -245,6 +245,16 @@ impl WindowBuilder {
         self.menu = Some(menu);
     }
 
+    pub fn set_parent(&mut self, parent: &WindowHandle) {
+        // Note - This is not trivial, it seems GTK doesn't really support "child" windows,
+        //        so may need to map another concept here...
+        warn!("WindowBuilder::set_parent not implemented for GTK.");
+    }
+
+    pub fn set_has_render_target(&mut self, has_render_target: bool) {
+        warn!("Render-target-less window not supported for GTK.");
+    }
+
     pub fn build(self) -> Result<WindowHandle, ShellError> {
         let handler = self
             .handler
@@ -835,11 +845,27 @@ impl WindowState {
     }
 }
 
+impl PartialEq for WindowHandle {
+    fn eq(&self, other: &Self) -> bool {
+        self.state.ptr_eq(&other.state)
+    }
+}
+
 impl WindowHandle {
     pub fn show(&self) {
         if let Some(state) = self.state.upgrade() {
             state.window.show_all();
         }
+    }
+
+    pub fn parent(&self) -> Option<WindowHandle> {
+        error!("WindowHandle::parent is currently unimplemented for GTK.");
+        None
+    }
+
+    pub fn children(&self) -> Vec<WindowHandle> {
+        error!("WindowHandle::children is currently unimplemented for GTK.");
+        Vec::new()
     }
 
     pub fn resizable(&self, resizable: bool) {
@@ -900,6 +926,20 @@ impl WindowHandle {
         } else {
             warn!("Could not get size for GTK window");
             Size::new(0., 0.)
+        }
+    }
+
+    // Sets the position and/or size of a native (child) window in DP
+    pub fn set_native_layout(&self, position: Option<Point>, size: Option<Size>) {
+        if let Some(state) = self.state.upgrade() {
+            if let Some(position) = position {
+                state.window.move_(position.x as i32, position.y as i32)
+            }
+            if let Some(size) = size {
+                state.window.resize(size.width as i32, size.height as i32)
+            }
+        } else {
+            warn!("Failed to set native layout; could not get GTK window.");
         }
     }
 

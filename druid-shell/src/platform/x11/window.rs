@@ -105,6 +105,9 @@ pub(crate) struct WindowBuilder {
     // TODO: implement min_size for X11
     #[allow(dead_code)]
     min_size: Size,
+
+    // Native parent window if any. If set, the build creates a native child window.
+    parent_id: Option<u32>,
 }
 
 impl WindowBuilder {
@@ -115,6 +118,7 @@ impl WindowBuilder {
             title: String::new(),
             size: Size::new(500.0, 400.0),
             min_size: Size::new(0.0, 0.0),
+            parent_id: None,
         }
     }
 
@@ -212,6 +216,14 @@ impl WindowBuilder {
         )
         .map_err(|status| anyhow!("Failed to create cairo surface: {}", status))?;
         Ok(cairo_surface)
+    }
+
+    pub fn set_parent(&mut self, parent: &WindowHandle) {
+        self.parent_id = Some(parent.id);
+    }
+
+    pub fn set_has_render_target(&mut self, has_render_target: bool) {
+        warn!("Render-target-less window not supported for x11.");
     }
 
     // TODO(x11/menus): make menus if requested
@@ -1378,6 +1390,12 @@ pub(crate) struct WindowHandle {
     window: Weak<Window>,
 }
 
+impl PartialEq for WindowHandle {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+
 impl WindowHandle {
     fn new(id: u32, window: Weak<Window>) -> WindowHandle {
         WindowHandle { id, window }
@@ -1397,6 +1415,16 @@ impl WindowHandle {
         } else {
             error!("Window {} has already been dropped", self.id);
         }
+    }
+
+    pub fn parent(&self) -> Option<WindowHandle> {
+        error!("WindowHandle::parent is currently unimplemented for X11 platforms.");
+        None
+    }
+
+    pub fn children(&self) -> Vec<WindowHandle> {
+        error!("WindowHandle::children is currently unimplemented for X11 platforms.");
+        Vec::new()
     }
 
     pub fn resizable(&self, resizable: bool) {
@@ -1440,6 +1468,20 @@ impl WindowHandle {
     pub fn get_size(&self) -> Size {
         warn!("WindowHandle::get_size is currently unimplemented for X11 platforms.");
         Size::new(0.0, 0.0)
+    }
+
+    // Sets the position and/or size of a native (child) window in DP
+    pub fn set_native_layout(&self, position: Option<Point>, size: Option<Size>) {
+        if let Some(w) = self.window.upgrade() {
+            if let Some(position) = position {
+                warn!("WindowHandle::set_native_layout(position) is currently unimplemented for X11 platforms.");
+            }
+            if let Some(size) = size {
+                warn!("WindowHandle::set_native_layout(size) is currently unimplemented for X11 platforms.");
+            }
+        } else {
+            warn!("Failed to set native layout; could not get x11 window.");
+        }
     }
 
     pub fn set_window_state(&self, _state: window::WindowState) {

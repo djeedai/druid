@@ -14,7 +14,7 @@
 
 //! Management of multiple windows.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::mem;
 use tracing::{error, info, info_span};
 
@@ -44,6 +44,15 @@ pub type ImeUpdateFn = dyn FnOnce(crate::shell::text::Event);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct WindowId(u64);
 
+/// Native child window inside a `Window<T>` top-level window.
+///
+/// The native child window has only a platform handle, and does not have all the abstraction
+/// boilerplate of a `Window<T>` top-level window. Is is for special use cases where the widget
+/// requires a native platform window for its implement (see `HasRawWindowHandle` trait).
+pub struct ChildWindow {
+    pub(crate) handle: WindowHandle,
+}
+
 /// Per-window state not owned by user code.
 pub struct Window<T> {
     pub(crate) id: WindowId,
@@ -64,6 +73,8 @@ pub struct Window<T> {
     pub(crate) ime_handlers: Vec<(TextFieldToken, TextFieldRegistration)>,
     ext_handle: ExtEventSink,
     pub(crate) ime_focus_change: Option<Option<TextFieldToken>>,
+    /// Native windows which are direct children of this one.
+    pub(crate) children: HashSet<WindowId>,
 }
 
 impl<T> Window<T> {
@@ -91,6 +102,7 @@ impl<T> Window<T> {
             ext_handle,
             ime_handlers: Vec::new(),
             ime_focus_change: None,
+            children: HashSet::new(),
         }
     }
 }

@@ -172,6 +172,12 @@ pub enum WindowState {
 #[derive(Clone, Default)]
 pub struct WindowHandle(platform::WindowHandle);
 
+impl PartialEq for WindowHandle {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+
 impl WindowHandle {
     /// Make this window visible.
     ///
@@ -184,6 +190,24 @@ impl WindowHandle {
     /// Close the window.
     pub fn close(&self) {
         self.0.close()
+    }
+
+    /// Get the parent window, if any.
+    pub fn parent(&self) -> Option<WindowHandle> {
+        if let Some(handle) = self.0.parent() {
+            Some(WindowHandle(handle))
+        } else {
+            None
+        }
+    }
+
+    /// Get the collection of child windows.
+    pub fn children(&self) -> Vec<WindowHandle> {
+        self.0
+            .children()
+            .iter()
+            .map(|h| WindowHandle(h.clone()))
+            .collect()
     }
 
     /// Set whether the window should be resizable
@@ -250,6 +274,13 @@ impl WindowHandle {
     /// Gets the window size, in [pixels](crate::Scale).
     pub fn get_size(&self) -> Size {
         self.0.get_size()
+    }
+
+    /// Set the position and/or size of the native platform window that this window manages.
+    /// This is only valid if the window is a child window. Do not use this to move a top-level
+    /// window `Window<T>`.
+    pub fn set_native_layout(&self, position: Option<Point>, size: Option<Size>) {
+        self.0.set_native_layout(position, size);
     }
 
     /// Sets the [`WindowLevel`](crate::WindowLevel), the z-order in the Window system / compositor
@@ -403,6 +434,10 @@ impl WindowHandle {
     pub fn get_scale(&self) -> Result<Scale, Error> {
         self.0.get_scale().map_err(Into::into)
     }
+
+    //pub fn get_children(&self) -> Vec<WindowHandle> {
+    //    self.0.get_children()
+    //}
 }
 
 #[cfg(feature = "raw-win-handle")]
@@ -493,6 +528,20 @@ impl WindowBuilder {
         self.0.set_window_state(state);
     }
 
+    /// Sets the initial window parent. Advanced use only.
+    /// This creates a native child window whose parent is the given window.
+    pub fn set_parent(&mut self, parent: &WindowHandle) {
+        self.0.set_parent(&parent.0);
+    }
+
+    /// Sets whether the window has a render target for Piet.
+    /// This is almost always false for all widgets, but can be set to true when
+    /// using a custom backend like wgpu. In that case, [`WinHandler::paint_raw`]
+    /// is called instead of [`WinHandler::paint`].
+    pub fn set_has_render_target(&mut self, has_render_target: bool) {
+        self.0.set_has_render_target(has_render_target);
+    }
+
     /// Attempt to construct the platform window.
     ///
     /// If this fails, your application should exit.
@@ -545,6 +594,11 @@ pub trait WinHandler {
     /// instead, then it's possible we don't need this.
     #[allow(unused_variables)]
     fn rebuild_resources(&mut self) {}
+
+    /// Alternative to [`paint`] for custom rendering not based on the druid back-end.
+    /// This is motivated by wgpu integration, but can be used for other purposes.
+    /// Called instead of [`paint`] when the window is created without a render target.
+    fn paint_raw(&mut self) {}
 
     /// Called when a menu item is selected.
     #[allow(unused_variables)]
@@ -684,9 +738,187 @@ impl From<platform::WindowHandle> for WindowHandle {
 #[cfg(test)]
 mod test {
     use super::*;
+    use std::cell::RefCell;
+    use std::rc::Rc;
 
     use static_assertions as sa;
 
     sa::assert_not_impl_any!(WindowHandle: Send, Sync);
     sa::assert_impl_all!(IdleHandle: Send);
+
+    trait TestData {
+        fn connect(&mut self, _handle: &WindowHandle) {}
+        fn paint(&mut self) {}
+        fn paint_raw(&mut self) {}
+    }
+
+    struct TestHandler<T> {
+        state: Rc<RefCell<T>>,
+        handle: WindowHandle,
+        timeout: Duration,
+        timeout_token: TimerToken,
+    }
+
+    impl<T: TestData + 'static> TestHandler<T> {
+        fn new(state: Rc<RefCell<T>>) -> TestHandler<T> {
+            TestHandler {
+                state,
+                handle: WindowHandle::default(),
+                timeout: Duration::from_secs(10),
+                timeout_token: TimerToken::INVALID,
+            }
+        }
+    }
+
+    impl<T: TestData + 'static> WinHandler for TestHandler<T> {
+        fn connect(&mut self, handle: &WindowHandle) {
+            self.handle = handle.clone();
+            self.timeout_token = self.handle.request_timer(self.timeout);
+            self.state.borrow_mut().connect(handle);
+        }
+
+        fn prepare_paint(&mut self) {}
+
+        fn paint(&mut self, _piet: &mut piet_common::Piet, _region: &Region) {
+            self.state.borrow_mut().paint();
+        }
+
+        fn paint_raw(&mut self) {
+            self.state.borrow_mut().paint_raw();
+        }
+
+        fn timer(&mut self, token: TimerToken) {
+            if token == self.timeout_token {
+                tracing::error!("Test timed out.");
+                assert!(false);
+            }
+        }
+
+        fn request_close(&mut self) {
+            self.handle.close();
+        }
+
+        fn destroy(&mut self) {
+            Application::global().quit()
+        }
+
+        fn as_any(&mut self) -> &mut dyn Any {
+            self
+        }
+    }
+
+    /// Ensure paint_raw() is invoked instead of paint() when
+    /// WindowBuilder::set_has_render_target(false) is used.
+    #[test]
+    fn no_render_target() {
+        #[derive(Default)]
+        struct NoRenderTargetTestData {
+            handle: WindowHandle,
+            was_painted: bool,
+            was_painted_raw: bool,
+        }
+
+        impl NoRenderTargetTestData {
+            fn new() -> NoRenderTargetTestData {
+                NoRenderTargetTestData {
+                    handle: WindowHandle::default(),
+                    was_painted: false,
+                    was_painted_raw: false,
+                }
+            }
+        }
+
+        impl TestData for NoRenderTargetTestData {
+            fn connect(&mut self, handle: &WindowHandle) {
+                self.handle = handle.clone();
+            }
+
+            fn paint(&mut self) {
+                self.was_painted = true;
+                Application::global().quit()
+            }
+
+            fn paint_raw(&mut self) {
+                self.was_painted_raw = true;
+                Application::global().quit()
+            }
+        }
+
+        let app = Application::new().unwrap();
+
+        let state = Rc::new(RefCell::new(NoRenderTargetTestData::new()));
+
+        let mut builder = WindowBuilder::new(app.clone());
+        builder.set_handler(Box::new(TestHandler::new(state.clone())));
+        builder.set_has_render_target(false);
+        let window = builder.build().unwrap();
+        window.show();
+
+        app.run(None);
+
+        assert_eq!(false, state.borrow().was_painted);
+        assert_eq!(true, state.borrow().was_painted_raw);
+    }
+
+    #[test]
+    fn create_native_child() {
+        #[derive(Default)]
+        struct CreateNativeChileTestData {
+            handles: Vec<WindowHandle>,
+            was_painted: bool,
+        }
+
+        impl CreateNativeChileTestData {
+            fn new() -> CreateNativeChileTestData {
+                CreateNativeChileTestData {
+                    handles: Vec::new(),
+                    was_painted: false,
+                }
+            }
+        }
+
+        impl TestData for CreateNativeChileTestData {
+            fn connect(&mut self, handle: &WindowHandle) {
+                self.handles.push(handle.clone());
+                if self.handles.len() == 2 {
+                    let parent_handle = self.handles[0].clone();
+                    let child_handle = self.handles[1].clone();
+                    // First is root parent
+                    assert!(parent_handle.parent().is_none());
+                    assert_eq!(1, parent_handle.children().len());
+                    assert!(child_handle == parent_handle.children()[0]);
+                    // Second is its child
+                    assert!(child_handle.parent().is_some());
+                    assert!(child_handle.parent().unwrap() == parent_handle);
+                    assert_eq!(0, child_handle.children().len());
+                    // End of test
+                    Application::global().quit()
+                }
+            }
+
+            fn paint(&mut self) {
+                self.was_painted = true;
+            }
+        }
+
+        let app = Application::new().unwrap();
+
+        let state = Rc::new(RefCell::new(CreateNativeChileTestData::new()));
+
+        let mut builder = WindowBuilder::new(app.clone());
+        builder.set_handler(Box::new(TestHandler::new(state.clone())));
+        let window = builder.build().unwrap();
+
+        let mut child_builder = WindowBuilder::new(app.clone());
+        child_builder.set_handler(Box::new(TestHandler::new(state.clone())));
+        child_builder.set_parent(&window);
+        child_builder.set_position(Point::new(10., 10.));
+        child_builder.set_size(Size::new(200., 150.));
+        let child_window = child_builder.build().unwrap();
+
+        child_window.show();
+        window.show();
+
+        app.run(None);
+    }
 }

@@ -399,6 +399,14 @@ impl WindowBuilder {
         self.menu = Some(menu);
     }
 
+    pub fn set_parent(&mut self, parent: &WindowHandle) {
+        warn!("WindowBuilder::set_parent not implemented for web.");
+    }
+
+    pub fn set_has_render_target(&mut self, has_render_target: bool) {
+        warn!("Render-target-less window not supported for web.");
+    }
+
     pub fn build(self) -> Result<WindowHandle, Error> {
         let window = web_sys::window().ok_or(Error::NoWindow)?;
         let canvas = window
@@ -465,9 +473,25 @@ impl WindowBuilder {
     }
 }
 
+impl PartialEq for WindowHandle {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.ptr_eq(&other.0)
+    }
+}
+
 impl WindowHandle {
     pub fn show(&self) {
         self.render_soon();
+    }
+
+    pub fn parent(&self) -> Option<WindowHandle> {
+        error!("WindowHandle::parent is currently unimplemented for web.");
+        None
+    }
+
+    pub fn children(&self) -> Vec<WindowHandle> {
+        error!("WindowHandle::children is currently unimplemented for web.");
+        Vec::new()
     }
 
     pub fn resizable(&self, _resizable: bool) {
@@ -498,6 +522,22 @@ impl WindowHandle {
     pub fn get_size(&self) -> Size {
         warn!("WindowHandle::get_size unimplemented for web.");
         Size::new(0.0, 0.0)
+    }
+
+    // Sets the position and/or size of a native (child) window in DP
+    pub fn set_native_layout(&self, position: Option<Point>, size: Option<Size>) {
+        if let Some(state) = self.state.upgrade() {
+            if let Some(position) = position {
+                warn!(
+                    "WindowHandle::set_native_layout(position) is currently unimplemented for web."
+                );
+            }
+            if let Some(size) = size {
+                warn!("WindowHandle::set_native_layout(size) is currently unimplemented for web.");
+            }
+        } else {
+            warn!("Failed to set native layout; could not get web window.");
+        }
     }
 
     pub fn content_insets(&self) -> Insets {

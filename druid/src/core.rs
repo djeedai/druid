@@ -57,6 +57,22 @@ pub struct WidgetPod<T, W> {
     debug_widget_text: TextLayout<ArcStr>,
 }
 
+/// Generic state for widgets which have a native platform window associated with
+/// them. The widget manages the position and size of that native window automatically
+/// to match the layout of the widget itself.
+#[derive(Clone)]
+pub(crate) struct NativeWidgetState {
+    /// Window id of the native child window this widget owns.
+    pub(crate) window_id: WindowId,
+    /// Window id of the native parent window.
+    pub(crate) parent_window_id: WindowId,
+    /// Position of the native window relative to its native parent window. This
+    /// is usually different from the widget origin, which relates to the parent
+    /// widget which may not have a native window.
+    /// The size of the native window is the same as the size of the widget.
+    pub(crate) native_position: Point,
+}
+
 /// Generic state for all widgets in the hierarchy.
 ///
 /// This struct contains the widget's layout rect, flags
@@ -111,6 +127,11 @@ pub(crate) struct WidgetState {
     pub(crate) is_active: bool,
 
     pub(crate) needs_layout: bool,
+
+    /// State of the native window this widget is owning, if any. This is populated only after
+    /// a widget requested a native window via [`LifeCycleCtx::request_native_window()`]. This
+    /// is `None` if the widget does not have a native window, which is the most common case.
+    pub(crate) native_state: Option<NativeWidgetState>,
 
     /// Any descendant is active.
     has_active: bool,
@@ -702,6 +723,7 @@ impl<T: Data, W: Widget<T>> WidgetPod<T, W> {
                 }
                 true
             }
+            Event::NativeWindowConnected(_) => true,
             Event::WindowSize(_) => {
                 self.state.needs_layout = true;
                 ctx.is_root
@@ -1117,6 +1139,7 @@ impl WidgetState {
             baseline_offset: 0.0,
             is_hot: false,
             needs_layout: false,
+            native_state: None,
             is_active: false,
             has_active: false,
             has_focus: false,

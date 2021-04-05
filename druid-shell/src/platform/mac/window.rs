@@ -227,6 +227,15 @@ impl WindowBuilder {
         self.menu = Some(menu);
     }
 
+    pub fn set_parent(&mut self, parent: &WindowHandle) {
+        // TODO - On mac, a "window" is really an NSView, so "parent" is the parent NSView
+        warn!("WindowBuilder::set_parent not implemented for mac.");
+    }
+
+    pub fn set_has_render_target(&mut self, has_render_target: bool) {
+        warn!("Render-target-less window not supported for mac.");
+    }
+
     pub fn build(self) -> Result<WindowHandle, Error> {
         assert_main_thread();
         unsafe {
@@ -984,6 +993,20 @@ extern "C" fn window_will_close(this: &mut Object, _: Sel, _notification: id) {
     }
 }
 
+impl PartialEq for WindowHandle {
+    fn eq(&self, other: &Self) -> bool {
+        if let Some(self_state) = self.nsview.load() {
+            if let Some(other_state) = other.nsview.load() {
+                self_state == other_state
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+}
+
 impl WindowHandle {
     pub fn show(&self) {
         unsafe {
@@ -1005,6 +1028,16 @@ impl WindowHandle {
             let window: id = msg_send![*self.nsview.load(), window];
             let () = msg_send![window, performSelectorOnMainThread: sel!(close) withObject: nil waitUntilDone: NO];
         }
+    }
+
+    pub fn parent(&self) -> Option<WindowHandle> {
+        error!("WindowHandle::parent is currently unimplemented for mac platforms.");
+        None
+    }
+
+    pub fn children(&self) -> Vec<WindowHandle> {
+        error!("WindowHandle::children is currently unimplemented for mac platforms.");
+        Vec::new()
     }
 
     /// Bring this window to the front of the window stack and give it focus.
@@ -1266,6 +1299,20 @@ impl WindowHandle {
             let window: id = msg_send![*self.nsview.load(), window];
             let current_frame: NSRect = msg_send![window, frame];
             Size::new(current_frame.size.width, current_frame.size.height)
+        }
+    }
+
+    // Sets the position and/or size of a native (child) window in DP
+    pub fn set_native_layout(&self, position: Option<Point>, size: Option<Size>) {
+        if let Some(w) = self.window.upgrade() {
+            if let Some(position) = position {
+                warn!("WindowHandle::set_native_layout(position) is currently unimplemented for mac platforms.");
+            }
+            if let Some(size) = size {
+                warn!("WindowHandle::set_native_layout(size) is currently unimplemented for mac platforms.");
+            }
+        } else {
+            warn!("Failed to set native layout; could not get mac window.");
         }
     }
 

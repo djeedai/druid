@@ -99,6 +99,8 @@ pub(crate) struct WindowBuilder {
     min_size: Option<Size>,
     position: Option<Point>,
     state: window::WindowState,
+    parent: Option<WindowHandle>,
+    has_render_target: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -163,6 +165,7 @@ enum DeferredOp {
     ReleaseMouseCapture,
 }
 
+/// Reference to a top-level window.
 #[derive(Clone)]
 pub struct WindowHandle {
     text: PietText,
@@ -209,6 +212,8 @@ enum IdleKind {
 /// by interior mutability, so we can handle reentrant calls.
 struct WindowState {
     hwnd: Cell<HWND>,
+    parent: Option<RefCell<WindowHandle>>,
+    children: RefCell<Vec<WindowHandle>>,
     scale: Cell<Scale>,
     area: Cell<ScaledArea>,
     invalid: RefCell<Region>,
@@ -223,6 +228,9 @@ struct WindowState {
     is_resizable: Cell<bool>,
     handle_titlebar: Cell<bool>,
     active_text_input: Cell<Option<TextFieldToken>>,
+    // Window has a DXGI render target for Piet backend to use.
+    // This is almost always true, except for special cases like wgpu.
+    has_render_target: Cell<bool>,
 }
 
 /// Generic handler trait for the winapi window procedure entry point.
@@ -307,6 +315,18 @@ const DS_RUN_IDLE: UINT = WM_USER;
 /// send this message to request destroying the window, so that at the
 /// time it is handled, we can successfully borrow the handler.
 pub(crate) const DS_REQUEST_DESTROY: UINT = WM_USER + 1;
+
+/// Message to set the native window position.
+///
+/// This is used instead of directly setting the window position to avoid the
+/// WM_MOVE native event, which is only correctly handled by top-level windows.
+const DS_SET_NATIVE_POSITION: UINT = WM_USER + 2;
+
+/// Message to set the native window size.
+///
+/// This is used instead of directly setting the window size to avoid the
+/// WM_SIZE native event, which is only correctly handled by top-level windows.
+const DS_SET_NATIVE_SIZE: UINT = WM_USER + 3;
 
 impl Default for PresentStrategy {
     fn default() -> PresentStrategy {
@@ -678,7 +698,7 @@ impl WndProc for MyWndProc {
         //println!("wndproc msg: {}", msg);
         match msg {
             WM_CREATE => {
-                // Only supported on Windows 10, Could remove this as the 8.1 version below also works on 10..
+                // Only supported on Windows 10, Could remove this as the 8.1 version below also works on 10.
                 let scale_factor = if let Some(func) = OPTIONAL_FUNCTIONS.GetDpiForWindow {
                     unsafe { func(hwnd) as f64 / SCALE_TARGET_DPI }
                 }
@@ -697,24 +717,32 @@ impl WndProc for MyWndProc {
                 let scale = Scale::new(scale_factor, scale_factor);
                 self.set_scale(scale);
 
-                if let Some(state) = self.handle.borrow().state.upgrade() {
+                let has_render_target = if let Some(state) = self.handle.borrow().state.upgrade() {
                     state.hwnd.set(hwnd);
-                }
+                    state.has_render_target.get()
+                } else {
+                    true
+                };
+
                 if let Some(state) = self.state.borrow_mut().as_mut() {
-                    let dxgi_state = unsafe {
-                        create_dxgi_state(self.present_strategy, hwnd, self.is_transparent())
-                            .unwrap_or_else(|e| {
-                                error!("Creating swapchain failed: {:?}", e);
-                                None
-                            })
-                    };
-                    state.dxgi_state = dxgi_state;
+                    if has_render_target {
+                        let dxgi_state = unsafe {
+                            create_dxgi_state(self.present_strategy, hwnd, self.is_transparent())
+                                .unwrap_or_else(|e| {
+                                    error!("Creating swapchain failed: {:?}", e);
+                                    None
+                                })
+                        };
+                        state.dxgi_state = dxgi_state;
+                    }
 
                     let handle = self.handle.borrow().to_owned();
                     state.handler.connect(&handle.into());
 
-                    if let Err(e) = state.rebuild_render_target(&self.d2d_factory, scale) {
-                        error!("error building render target: {}", e);
+                    if has_render_target {
+                        if let Err(e) = state.rebuild_render_target(&self.d2d_factory, scale) {
+                            error!("error building render target: {}", e);
+                        }
                     }
                 }
                 Some(0)
@@ -783,16 +811,21 @@ impl WndProc for MyWndProc {
                     let invalid = self.take_invalid();
                     if !invalid.rects().is_empty() {
                         s.handler.rebuild_resources();
-                        s.render(&self.d2d_factory, &self.text, &invalid);
-                        if let Some(ref mut ds) = s.dxgi_state {
-                            let mut dirty_rects = util::region_to_rectis(&invalid, self.scale());
-                            let params = DXGI_PRESENT_PARAMETERS {
-                                DirtyRectsCount: dirty_rects.len() as u32,
-                                pDirtyRects: dirty_rects.as_mut_ptr(),
-                                pScrollRect: null_mut(),
-                                pScrollOffset: null_mut(),
-                            };
-                            (*ds.swap_chain).Present1(1, 0, &params);
+                        if s.render_target.is_some() {
+                            s.render(&self.d2d_factory, &self.text, &invalid);
+                            if let Some(ref mut ds) = s.dxgi_state {
+                                let mut dirty_rects =
+                                    util::region_to_rectis(&invalid, self.scale());
+                                let params = DXGI_PRESENT_PARAMETERS {
+                                    DirtyRectsCount: dirty_rects.len() as u32,
+                                    pDirtyRects: dirty_rects.as_mut_ptr(),
+                                    pScrollRect: null_mut(),
+                                    pScrollOffset: null_mut(),
+                                };
+                                (*ds.swap_chain).Present1(1, 0, &params);
+                            }
+                        } else {
+                            s.handler.paint_raw();
                         }
                     }
                 });
@@ -891,6 +924,34 @@ impl WndProc for MyWndProc {
                 }
                 Some(hit)
             },
+            DS_SET_NATIVE_POSITION => unsafe {
+                let x = LOWORD(lparam as u32) as i32;
+                let y = HIWORD(lparam as u32) as i32;
+                SetWindowPos(
+                    hwnd,
+                    HWND_TOPMOST,
+                    (x as f64 * self.scale().x()) as i32,
+                    (y as f64 * self.scale().x()) as i32,
+                    0,
+                    0,
+                    SWP_NOZORDER | SWP_NOSIZE,
+                );
+                Some(0)
+            },
+            DS_SET_NATIVE_SIZE => unsafe {
+                let width = LOWORD(lparam as u32) as i32;
+                let height = HIWORD(lparam as u32) as i32;
+                SetWindowPos(
+                    hwnd,
+                    HWND_TOPMOST,
+                    0,
+                    0,
+                    (width as f64 * self.scale().x()) as i32,
+                    (height as f64 * self.scale().y()) as i32,
+                    SWP_NOZORDER | SWP_NOMOVE,
+                );
+                Some(0)
+            },
             WM_SIZE => unsafe {
                 let width = LOWORD(lparam as u32) as u32;
                 let height = HIWORD(lparam as u32) as u32;
@@ -903,32 +964,31 @@ impl WndProc for MyWndProc {
                     let size_dp = area.size_dp();
                     self.set_area(area);
                     s.handler.size(size_dp);
-                    let res;
-                    {
+                    if let Some(dxgi_state) = s.dxgi_state.as_mut() {
                         s.render_target = None;
-                        res = (*s.dxgi_state.as_mut().unwrap().swap_chain).ResizeBuffers(
+                        let res = (*dxgi_state.swap_chain).ResizeBuffers(
                             0,
                             width,
                             height,
                             DXGI_FORMAT_UNKNOWN,
                             0,
                         );
-                    }
-                    if SUCCEEDED(res) {
-                        if let Err(e) = s.rebuild_render_target(&self.d2d_factory, scale) {
-                            error!("error building render target: {}", e);
+                        if SUCCEEDED(res) {
+                            if let Err(e) = s.rebuild_render_target(&self.d2d_factory, scale) {
+                                error!("error building render target: {}", e);
+                            }
+                            s.render(&self.d2d_factory, &self.text, &size_dp.to_rect().into());
+                            let present_after = match self.present_strategy {
+                                PresentStrategy::Sequential => 1,
+                                _ => 0,
+                            };
+                            if let Some(ref mut dxgi_state) = s.dxgi_state {
+                                (*dxgi_state.swap_chain).Present(present_after, 0);
+                            }
+                            ValidateRect(hwnd, null_mut());
+                        } else {
+                            error!("ResizeBuffers failed: 0x{:x}", res);
                         }
-                        s.render(&self.d2d_factory, &self.text, &size_dp.to_rect().into());
-                        let present_after = match self.present_strategy {
-                            PresentStrategy::Sequential => 1,
-                            _ => 0,
-                        };
-                        if let Some(ref mut dxgi_state) = s.dxgi_state {
-                            (*dxgi_state.swap_chain).Present(present_after, 0);
-                        }
-                        ValidateRect(hwnd, null_mut());
-                    } else {
-                        error!("ResizeBuffers failed: 0x{:x}", res);
                     }
                 })
                 .map(|_| 0)
@@ -1233,6 +1293,8 @@ impl WindowBuilder {
             min_size: None,
             position: None,
             state: window::WindowState::Restored,
+            parent: None,
+            has_render_target: true,
         }
     }
 
@@ -1290,6 +1352,14 @@ impl WindowBuilder {
         warn!("WindowBuilder::set_level  is currently unimplemented for Windows platforms.");
     }
 
+    pub fn set_parent(&mut self, parent: &WindowHandle) {
+        self.parent = Some(parent.clone());
+    }
+
+    pub fn set_has_render_target(&mut self, has_render_target: bool) {
+        self.has_render_target = has_render_target;
+    }
+
     pub fn build(self) -> Result<WindowHandle, Error> {
         unsafe {
             let class_name = super::util::CLASS_NAME.to_wide();
@@ -1305,9 +1375,27 @@ impl WindowBuilder {
                 present_strategy: self.present_strategy,
             };
 
+            let (parent_hwnd, has_parent) = if let Some(parent) = &self.parent {
+                if let Some(parent_state) = parent.state.upgrade() {
+                    let hwnd: HWND = parent_state.hwnd.get();
+                    (hwnd, true)
+                } else {
+                    (0 as HWND, false)
+                }
+            } else {
+                (0 as HWND, false)
+            };
+
             let (pos_x, pos_y) = match self.position {
                 Some(pos) => (pos.x as i32, pos.y as i32),
-                None => (CW_USEDEFAULT, CW_USEDEFAULT),
+                None => {
+                    if has_parent {
+                        // CW_USEDEFAULT is invalid for child windows
+                        (0, 0)
+                    } else {
+                        (CW_USEDEFAULT, CW_USEDEFAULT)
+                    }
+                }
             };
             let scale = Scale::new(1.0, 1.0);
 
@@ -1319,7 +1407,18 @@ impl WindowBuilder {
                     let size_px = area.size_px();
                     (size_px.width as i32, size_px.height as i32)
                 })
-                .unwrap_or((CW_USEDEFAULT, CW_USEDEFAULT));
+                .unwrap_or(if has_parent {
+                    // Something non-zero; CW_USEDEFAULT is invalid for child windows
+                    (200, 200)
+                } else {
+                    (CW_USEDEFAULT, CW_USEDEFAULT)
+                });
+            if has_parent && (width == 0 || height == 0) {
+                debug!(
+                    "creating native child window with empty size {}x{}",
+                    width, height
+                );
+            }
 
             let (hmenu, accels, has_menu) = match self.menu {
                 Some(menu) => {
@@ -1330,7 +1429,14 @@ impl WindowBuilder {
             };
 
             let window = WindowState {
+                // 'hwnd' is assigned in window_proc() on WM_CREATE
                 hwnd: Cell::new(0 as HWND),
+                parent: if let Some(parent) = &self.parent {
+                    Some(RefCell::new(parent.clone()))
+                } else {
+                    None
+                },
+                children: RefCell::new(Vec::new()),
                 scale: Cell::new(scale),
                 area: Cell::new(area),
                 invalid: RefCell::new(Region::EMPTY),
@@ -1344,6 +1450,7 @@ impl WindowBuilder {
                 is_transparent: Cell::new(self.transparent),
                 handle_titlebar: Cell::new(false),
                 active_text_input: Cell::new(None),
+                has_render_target: Cell::new(self.has_render_target),
             };
             let win = Rc::new(window);
             let handle = WindowHandle {
@@ -1366,11 +1473,15 @@ impl WindowBuilder {
             };
             win.wndproc.connect(&handle, state);
 
-            let mut dwStyle = WS_OVERLAPPEDWINDOW;
-            if !self.resizable {
+            let mut dwStyle = if has_parent {
+                WS_CHILD | WS_VISIBLE
+            } else {
+                WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN
+            };
+            if !self.resizable || has_parent {
                 dwStyle &= !(WS_THICKFRAME | WS_MAXIMIZEBOX);
             }
-            if !self.show_titlebar {
+            if !self.show_titlebar || has_parent {
                 dwStyle &= !(WS_MINIMIZEBOX | WS_SYSMENU | WS_OVERLAPPED);
             }
             let mut dwExStyle = 0;
@@ -1378,12 +1489,25 @@ impl WindowBuilder {
                 dwExStyle |= WS_EX_NOREDIRECTIONBITMAP;
             }
 
-            match self.state {
-                window::WindowState::Maximized => dwStyle |= WS_MAXIMIZE,
-                window::WindowState::Minimized => dwStyle |= WS_MINIMIZE,
-                _ => (),
-            };
+            if !has_parent {
+                match self.state {
+                    window::WindowState::Maximized => dwStyle |= WS_MAXIMIZE,
+                    window::WindowState::Minimized => dwStyle |= WS_MINIMIZE,
+                    _ => (),
+                };
+            }
 
+            // Add child to parent's collection before knowing if the window creation
+            // will be successful, because this makes the state consistent when connect()
+            // is invoked. This needs clean-up if window creation fails.
+            if let Some(parent) = &self.parent {
+                if let Some(parent_state) = parent.state.upgrade() {
+                    parent_state.children.borrow_mut().push(handle.clone());
+                }
+            }
+
+            // Create the native OS window. This will *synchronously* emit WM_CREATE and
+            // therefore call connect() on the handler before this calls completes.
             let hwnd = create_window(
                 dwExStyle,
                 class_name.as_ptr(),
@@ -1393,12 +1517,21 @@ impl WindowBuilder {
                 pos_y,
                 width,
                 height,
-                0 as HWND,
+                parent_hwnd,
                 hmenu,
                 0 as HINSTANCE,
                 win,
             );
             if hwnd.is_null() {
+                if let Some(parent) = &self.parent {
+                    if let Some(parent_state) = parent.state.upgrade() {
+                        parent_state.children.borrow_mut().pop();
+                    }
+                }
+                error!(
+                    "Failed to create native Win32 window: {}",
+                    Error::Hr(HRESULT_FROM_WIN32(GetLastError()))
+                );
                 return Err(Error::NullHwnd);
             }
 
@@ -1675,6 +1808,12 @@ impl Cursor {
     }
 }
 
+impl PartialEq for WindowHandle {
+    fn eq(&self, other: &Self) -> bool {
+        self.state.ptr_eq(&other.state)
+    }
+}
+
 impl WindowHandle {
     pub fn show(&self) {
         if let Some(w) = self.state.upgrade() {
@@ -1697,6 +1836,26 @@ impl WindowHandle {
             unsafe {
                 PostMessageW(hwnd, DS_REQUEST_DESTROY, 0, 0);
             }
+        }
+    }
+
+    pub fn parent(&self) -> Option<WindowHandle> {
+        if let Some(state) = self.state.upgrade() {
+            if let Some(parent_handle) = &state.parent {
+                Some(parent_handle.borrow().clone())
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    }
+
+    pub fn children(&self) -> Vec<WindowHandle> {
+        if let Some(state) = self.state.upgrade() {
+            state.children.borrow().clone()
+        } else {
+            Vec::new()
         }
     }
 
@@ -1862,6 +2021,24 @@ impl WindowHandle {
 
     pub fn resizable(&self, resizable: bool) {
         self.defer(DeferredOp::SetResizable(resizable));
+    }
+
+    // Sets the position and/or size of a native (child) window in DP
+    pub fn set_native_layout(&self, position: Option<Point>, size: Option<Size>) {
+        if let Some(hwnd) = self.get_hwnd() {
+            unsafe {
+                if let Some(position) = position {
+                    let lparam: LPARAM = MAKELONG(position.x as u16, position.y as u16) as LPARAM;
+                    PostMessageW(hwnd, DS_SET_NATIVE_POSITION, 0, lparam);
+                }
+                if let Some(size) = size {
+                    let lparam: LPARAM = MAKELONG(size.width as u16, size.height as u16) as LPARAM;
+                    PostMessageW(hwnd, DS_SET_NATIVE_SIZE, 0, lparam);
+                }
+            }
+        } else {
+            warn!("Failed to set native layout; could not get HWND.");
+        }
     }
 
     // Sets the window state.
